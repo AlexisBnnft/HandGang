@@ -3,19 +3,27 @@ import numpy as np
 import time
 import random
 import string
+#import pygame
+import os
+import subprocess
+from scipy.io import wavfile
 
 # Custom modules
 from hand_tracker import HandTracker
 from gesture_store import GestureStore
 from gesture_processor import extract_distance_features, calculate_similarity
+from actions import ActionManager
+
+print("Starting application...")
 
 # --- Constants ---
 WEBCAM_INDEX = 0
-SIMILARITY_THRESHOLD = 1.5  # Adjust this based on testing (lower = stricter match)
+SIMILARITY_THRESHOLD = 2  # Adjust this based on testing (lower = stricter match)
 DISPLAY_MSG_TIME = 2  # Seconds to display status messages
 
 # --- Initialization ---
-hand_tracker = HandTracker(max_hands=1)  # Track only one hand
+action_manager = ActionManager()
+hand_tracker = HandTracker(max_hands=2)  # Track both hands
 gesture_store = GestureStore(filepath="gestures.json")
 cap = cv2.VideoCapture(WEBCAM_INDEX)
 
@@ -31,9 +39,14 @@ print("Press 'Q' to quit.")
 prev_frame_time = 0
 status_message = ""
 message_display_end_time = 0
-current_features = (
-    None  # Store the normalized features of the hand in the current frame
-)
+current_features = {
+    "Left": None,
+    "Right": None
+}
+last_validated_gestures = {
+    "Left": None,
+    "Right": None
+}
 
 # --- Main Loop ---
 try:
@@ -53,48 +66,53 @@ try:
         prev_frame_time = new_frame_time
 
         # --- Hand Tracking & Processing ---
-        frame_processed, results = hand_tracker.process_frame(
-            frame
-        )  # Gets flipped frame and results
+        frame_processed, results = hand_tracker.process_frame(frame)
 
-        best_match_name = "No Hand Detected"
-        current_features = None  # Reset features for this frame
+        best_matches = {
+            "Left": "No Hand Detected",
+            "Right": "No Hand Detected"
+        }
+        current_features = {"Left": None, "Right": None}  # Reset features for this frame
 
         if results.multi_hand_landmarks:
-            # Get landmarks for the first detected hand
-            hand_landmarks = results.multi_hand_landmarks[0]
+            for hand_landmarks, hand_type in zip(
+                results.multi_hand_landmarks,
+                results.multi_handedness
+            ):
+                hand_type = hand_type.classification[0].label
+                
+                # Draw landmarks on the frame with appropriate style
+                hand_tracker.draw_landmarks(frame_processed, hand_landmarks, hand_type)
 
-            # Draw landmarks on the frame
-            hand_tracker.draw_landmarks(frame_processed, hand_landmarks)
+                # Extract features for this hand
+                current_features[hand_type] = extract_distance_features(hand_landmarks)
 
-            # Use the new function for feature extraction
-            current_features = extract_distance_features(hand_landmarks)
+                if current_features[hand_type] is not None:
+                    # --- Classification ---
+                    saved_gestures = gesture_store.get_gestures()
+                    min_distance = SIMILARITY_THRESHOLD
+                    found_match = False
 
-            if current_features is not None:
-                # --- Classification ---
-                saved_gestures = gesture_store.get_gestures()
-                min_distance = SIMILARITY_THRESHOLD
-                found_match = False
+                    for name, saved_feature_list in saved_gestures.items():
+                        saved_feature_vector = np.array(saved_feature_list)
+                        distance = calculate_similarity(
+                            current_features[hand_type], saved_feature_vector
+                        )
 
-                for name, saved_feature_list in saved_gestures.items():
-                    # Convert saved list back to numpy array for comparison
-                    saved_feature_vector = np.array(saved_feature_list)
+                        if distance < min_distance:
+                            min_distance = distance
+                            best_matches[hand_type] = name
+                            found_match = True
 
-                    # Calculate similarity
-                    distance = calculate_similarity(
-                        current_features, saved_feature_vector
-                    )
+                    if not found_match:
+                        best_matches[hand_type] = "Unknown Gesture"
+                else:
+                    best_matches[hand_type] = "Feature Extraction Failed"
 
-                    if distance < min_distance:
-                        min_distance = distance
-                        best_match_name = name
-                        found_match = True
-
-                if not found_match:
-                    best_match_name = "Unknown Gesture"
-
-            else:
-                best_match_name = "Feature Extraction Failed"
+        # --- Execute Actions ---
+        right_gesture = best_matches["Right"]
+        left_gesture = best_matches["Left"]
+        action_manager.execute_action(right_gesture, left_gesture)
 
         # --- Handle User Input ---
         key = cv2.waitKey(5) & 0xFF
@@ -104,22 +122,17 @@ try:
             break
 
         elif key == ord("r"):
-            if current_features is not None:
-                # Generate a simple random name
-                random_name = f"Sign_{random.randint(100, 999)}"
-                while (
-                    random_name in gesture_store.get_gesture_names()
-                ):  # Ensure unique name
-                    random_name = f"Sign_{random.randint(100, 999)}"
+            # Record gesture for the hand that is detected
+            for hand_type in ["Left", "Right"]:
+                if current_features[hand_type] is not None:
+                    random_name = f"{hand_type}_Sign_{random.randint(100, 999)}"
+                    while random_name in gesture_store.get_gesture_names():
+                        random_name = f"{hand_type}_Sign_{random.randint(100, 999)}"
 
-                gesture_store.add_gesture(random_name, current_features)
-                status_message = f"Saved: {random_name}"
-                message_display_end_time = time.time() + DISPLAY_MSG_TIME
-                print(f"Recorded gesture as '{random_name}'")
-            else:
-                status_message = "Cannot record: No hand detected or features invalid."
-                message_display_end_time = time.time() + DISPLAY_MSG_TIME
-                print("Recording failed: Hand not detected clearly.")
+                    gesture_store.add_gesture(random_name, current_features[hand_type])
+                    status_message = f"Saved {hand_type} hand: {random_name}"
+                    message_display_end_time = time.time() + DISPLAY_MSG_TIME
+                    print(f"Recorded {hand_type} hand gesture as '{random_name}'")
 
         # --- Display Information ---
         # Display FPS
@@ -133,17 +146,20 @@ try:
             2,
         )
 
-        # Display Classification Result
+        # Display Classification Results for both hands
         label_y = 60
-        cv2.putText(
-            frame_processed,
-            f"Detected: {best_match_name}",
-            (10, label_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (255, 255, 0),
-            2,
-        )
+        for hand_type in ["Left", "Right"]:
+            color = (0, 0, 255) if hand_type == "Left" else (0, 255, 0)
+            cv2.putText(
+                frame_processed,
+                f"{hand_type} Hand: {best_matches[hand_type]}",
+                (10, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                color,
+                2,
+            )
+            label_y += 40
 
         # Display Status Message (if any)
         if status_message and time.time() < message_display_end_time:
@@ -180,6 +196,7 @@ except KeyboardInterrupt:
 finally:
     # --- Cleanup ---
     print("Cleaning up...")
+    action_manager.cleanup()
     cap.release()
     cv2.destroyAllWindows()
     hand_tracker.close()
