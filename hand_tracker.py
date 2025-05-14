@@ -3,7 +3,7 @@ import mediapipe as mp
 
 
 class HandTracker:
-    def __init__(self, max_hands=1, detection_confidence=0.7, tracking_confidence=0.5):
+    def __init__(self, max_hands=2, detection_confidence=0.7, tracking_confidence=0.5):
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
@@ -13,6 +13,18 @@ class HandTracker:
         )
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_drawing_styles = mp.solutions.drawing_styles
+        
+        # Styles personnalisés pour les mains gauche et droite
+        self.left_hand_style = self.mp_drawing_styles.DrawingSpec(
+            color=(0, 0, 255),  # Rouge pour la main gauche
+            thickness=2,
+            circle_radius=2
+        )
+        self.right_hand_style = self.mp_drawing_styles.DrawingSpec(
+            color=(0, 255, 0),  # Vert pour la main droite
+            thickness=2,
+            circle_radius=2
+        )
         print("HandTracker initialized.")
 
     def process_frame(self, frame_bgr):
@@ -31,13 +43,14 @@ class HandTracker:
         # Return the flipped frame (for drawing) and the results
         return frame_flipped, results
 
-    def draw_landmarks(self, frame, hand_landmarks):
-        """Draws landmarks and connections on the frame."""
+    def draw_landmarks(self, frame, hand_landmarks, hand_type):
+        """Draws landmarks and connections on the frame with different styles for each hand."""
+        style = self.left_hand_style if hand_type == "Left" else self.right_hand_style
         self.mp_drawing.draw_landmarks(
             frame,
             hand_landmarks,
             self.mp_hands.HAND_CONNECTIONS,
-            self.mp_drawing_styles.get_default_hand_landmarks_style(),
+            style,
             self.mp_drawing_styles.get_default_hand_connections_style(),
         )
 
